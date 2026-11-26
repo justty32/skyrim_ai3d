@@ -1,6 +1,7 @@
 # 改寫自 agentctl `tools/head_render/raster.py` @ `111f240f`，手動同步。與原版的差異：
 # alpha test＋blend 可並用（先 test 再 blend）、blend 三角形每個視角由遠到近排序、背景色可給、
-# 另回每個 layer 實際畫到的像素數（`coverage`），其餘（投影、邊函數、Gouraud Lambert）照原版。
+# 另回每個 layer 實際畫到的像素數（`coverage`）、邊函數改用 1/256 像素定點整數＋top-left 填充規則
+# （共用邊的像素只歸一個三角形；fix-preview），其餘（投影、Gouraud Lambert）照原版。
 """純 Python 軟體光柵化：正交投影＋深度緩衝＋Gouraud（Lambert）＋可選貼圖。
 
 沒有 numpy；內層迴圈只做加法與比較。輸出 RGB bytearray，由呼叫端交給 Pillow 寫 PNG。
@@ -22,9 +23,11 @@ PALETTE = [(205, 190, 180), (120, 160, 210), (220, 140, 140), (130, 190, 140),
 BG = (40, 40, 46)
 # blend 模式下 alpha ≥ 這個值的片段當不透明畫（寫深度），其餘半透明疊色、不寫深度。
 BLEND_SOLID = 230
-LIGHT = (0.35, 0.85, 0.40)     # 相機座標（x' 右、y' 朝相機、z 上）：右上前方
+LIGHT = (0.35, 0.85, 0.40)     # 相機座標（x'＝畫面左、y' 朝相機、z 上）：光從畫面左上前方來
+                               # （front 時 x'＝角色右側，所以是角色的右上前方）
 AMBIENT = 0.30
 FILL = 0.92
+SUB = 256                      # 邊函數的定點精度：1/256 像素
 
 
 @dataclass
@@ -129,29 +132,37 @@ def _raster_layer(L: Layer, li: int, tris, sx, sy, sz, inten, img, zbuf, owner, 
     thr = L.threshold
     base = L.color
     nblend = 0
+    sxi = [_fix(v) for v in sx]
+    syi = [_fix(v) for v in sy]
+    half = SUB // 2
     for a, b, c in tris:
-        x0, y0, x1, y1, x2, y2 = sx[a], sy[a], sx[b], sy[b], sx[c], sy[c]
+        # 頂點先吸到 1/SUB 像素的整數格，邊函數全用整數算：共用邊兩側算出來的值正好互為相反數，
+        # 再配 top-left 規則（邊上的像素只歸「上邊或左邊」那一側），共用邊不會畫兩次、也不會漏。
+        x0, y0, x1, y1, x2, y2 = sxi[a], syi[a], sxi[b], syi[b], sxi[c], syi[c]
         area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
-        if area == 0.0:
+        if area == 0:
             continue
         if area < 0:
             b, c = c, b
             x1, y1, x2, y2 = x2, y2, x1, y1
             area = -area
         inv = 1.0 / area
-        minx = max(0, int(math.floor(min(x0, x1, x2))))
-        maxx = min(W - 1, int(math.ceil(max(x0, x1, x2))))
-        miny = max(0, int(math.floor(min(y0, y1, y2))))
-        maxy = min(H - 1, int(math.ceil(max(y0, y1, y2))))
+        minx = max(0, min(x0, x1, x2) // SUB)
+        maxx = min(W - 1, -(-max(x0, x1, x2) // SUB))
+        miny = max(0, min(y0, y1, y2) // SUB)
+        maxy = min(H - 1, -(-max(y0, y1, y2) // SUB))
         if minx > maxx or miny > maxy:
             continue
-        # 邊函數 w_i(px,py) = A_i*px + B_i*py + C_i，對頂點 i 的對邊
+        # 邊函數 w_i(px,py) = A_i*px + B_i*py + C_i，對頂點 i 的對邊；三角形內 w_i > 0。
         A0, B0 = (y1 - y2), (x2 - x1)
         A1, B1 = (y2 - y0), (x0 - x2)
         A2, B2 = (y0 - y1), (x1 - x0)
-        C0 = x1 * y2 - x2 * y1
-        C1 = x2 * y0 - x0 * y2
-        C2 = x0 * y1 - x1 * y0
+        # top-left：畫面 y 朝下，A > 0 是左邊、A == 0 且 B > 0 是上邊；這兩種邊上的像素（w == 0）算進來，
+        # 其餘的邊要 w > 0。整數下「w > 0」＝「w ≥ 1」，所以把非 top-left 邊的 C 減 1，內層照舊比 ≥ 0。
+        C0 = x1 * y2 - x2 * y1 - (0 if A0 > 0 or (A0 == 0 and B0 > 0) else 1)
+        C1 = x2 * y0 - x0 * y2 - (0 if A1 > 0 or (A1 == 0 and B1 > 0) else 1)
+        C2 = x0 * y1 - x1 * y0 - (0 if A2 > 0 or (A2 == 0 and B2 > 0) else 1)
+        dx0, dx1, dx2 = A0 * SUB, A1 * SUB, A2 * SUB
         za, zb, zc = sz[a], sz[b], sz[c]
         ia, ib, ic = inten[a], inten[b], inten[c]
         if textured:
@@ -159,14 +170,14 @@ def _raster_layer(L: Layer, li: int, tris, sx, sy, sz, inten, img, zbuf, owner, 
             ub, vb = uvs[b]
             uc, vc = uvs[c]
         for py in range(miny, maxy + 1):
-            fy = py + 0.5
-            fx = minx + 0.5
+            fy = py * SUB + half
+            fx = minx * SUB + half
             w0 = A0 * fx + B0 * fy + C0
             w1 = A1 * fx + B1 * fy + C1
             w2 = A2 * fx + B2 * fy + C2
             row = py * W
             for px in range(minx, maxx + 1):
-                if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
+                if w0 >= 0 and w1 >= 0 and w2 >= 0:
                     l0, l1, l2 = w0 * inv, w1 * inv, w2 * inv
                     z = l0 * za + l1 * zb + l2 * zc
                     idx = row + px
@@ -196,7 +207,12 @@ def _raster_layer(L: Layer, li: int, tris, sx, sy, sz, inten, img, zbuf, owner, 
                                 img[o + 2] = min(255, int(bl))
                                 zbuf[idx] = z
                                 owner[idx] = li
-                w0 += A0
-                w1 += A1
-                w2 += A2
+                w0 += dx0
+                w1 += dx1
+                w2 += dx2
     return nblend
+
+
+def _fix(v: float) -> int:
+    """畫面座標 → 1/SUB 像素的整數（四捨五入；決定性）。"""
+    return math.floor(v * SUB + 0.5)

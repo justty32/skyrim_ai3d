@@ -19,6 +19,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
@@ -51,6 +52,7 @@ class Options:
     hide: list = field(default_factory=list)
     skinned_transform: str = "ignore"
     bg: tuple = raster.BG
+    frame_from: str | None = None                 # rerun 用：照記錄寫回 camera.frame_from（None＝依 frame 判）
 
 
 # ---------------------------------------------------------------- 參數
@@ -83,11 +85,14 @@ def parse_views(spec: str) -> list[tuple[str, float]]:
 
 
 def parse_tex(items) -> list[tuple[str, str, bool]]:
-    """→ [(key, file, explicit_key)]。KEY=FILE 以第一個 `=` 切；沒有 `=` 時 key＝檔名主幹。"""
+    """→ [(key, file, explicit_key)]。KEY=FILE 以第一個 `=` 切；沒有 `=` 時 key＝檔名主幹。
+    整串本身就是一個存在的檔（路徑裡有 `=`）時當 FILE。"""
     out = []
     for it in items or []:
         key, sep, f = it.partition("=")
-        if sep and key and f:
+        if sep and os.path.isfile(it):
+            out.append((Path(it).stem, it, False))
+        elif sep and key and f:
             out.append((key.strip(), f, True))
         elif not sep:
             out.append((Path(it).stem, it, False))
@@ -244,6 +249,8 @@ def run(opt: Options) -> dict:
     views = parse_views(opt.views)
     if opt.size < 16 or opt.size > 4096:
         raise PreviewError("--size 要在 16–4096")
+    if opt.tex_max < 1:
+        raise PreviewError("--tex-max 要 ≥ 1")
     tex_entries = parse_tex(opt.tex)
     assets = AssetInputs(opt.data) if opt.data else None
     out_path = Path(opt.out).expanduser()
@@ -320,7 +327,7 @@ def run(opt: Options) -> dict:
                  "tex_max": opt.tex_max, "hide": list(opt.hide), "skinned_transform": opt.skinned_transform,
                  "bg": "%02X%02X%02X" % tuple(opt.bg)},
         "camera": {"projection": "orthographic", "frame": [*frame.center, frame.radius],
-                   "frame_from": "--frame" if opt.frame else "bounds", "fill": raster.FILL,
+                   "frame_from": opt.frame_from or ("--frame" if opt.frame else "bounds"), "fill": raster.FILL,
                    "light_camera_space": list(raster.LIGHT), "ambient": raster.AMBIENT,
                    "yaw_convention": "0=正面（相機在 +y 看 -y）、180=背面、90=從角色右側",
                    "views": [{"view": n, "yaw": y} for n, y in views]},
@@ -343,7 +350,7 @@ def options_from_doc(doc: dict, out) -> Options:
     bg = a.get("bg", "%02X%02X%02X" % raster.BG)
     return Options(nifs=a["nifs"], out=str(out), tex=a["tex"], data=a["data"], views=a["views"], size=a["size"],
                    frame=tuple(doc["camera"]["frame"]), tex_max=a["tex_max"], hide=a["hide"],
-                   skinned_transform=a["skinned_transform"],
+                   skinned_transform=a["skinned_transform"], frame_from=doc["camera"].get("frame_from"),
                    bg=tuple(int(bg[i:i + 2], 16) for i in (0, 2, 4)))
 
 

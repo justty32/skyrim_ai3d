@@ -30,14 +30,14 @@ python3 -m preview demo --out DIR
 - `--views`：`front`、`back`、`side`（從角色右側看）、`lside`、`q45`、`lq45`、`bq45`，或直接寫角度。預設 `front,back`。
 - `--frame`：固定取景。不給時取所有要畫的 shape 的包圍球。
 - `--hide`：不畫的 shape（shape key、shape 名或 NIF 檔名，可用 glob）。
-- `demo`：合成洋裝＋身體走一圈「改前預覽 → texedit unpack／edit → 改後預覽」，出 `compare.png`（上排改前、下排改後）。
+- `demo`：合成洋裝＋身體走一圈「改前預覽 → texedit unpack／edit → 改後預覽」，出 `compare.png`（上排改前、下排改後）。中段的 `unpack/`、`edit/` 由 texedit 寫，所以 `--out` 也要在 texedit 的准寫根裡（另加用 `$TEXEDIT_WRITE_ROOTS`）；不在的話開工前就拒。`--out` 底下有 symlink（檔或夾）也拒。
 
 ## 貼圖怎麼找
 
 每個 shape 只畫 diffuse，也就是貼圖槽 0。照下面的順序找，先找到的贏：
 
 1. `--tex KEY=FILE`，KEY 對到 shape：shape key（`<NIF 檔名主幹>.<shape 名>`，同 texedit）或 shape 名，可用 glob。
-2. `--tex KEY=FILE`，KEY 對到該 shape 的 diffuse 槽：槽路徑的檔名主幹（例如 `dress_d`），或 Data 相對全路徑。只給 `--tex FILE` 時，KEY 就是 FILE 的檔名主幹，所以 `edit/dress_d.png` 會自動對到 `dress_d.dds` 那個槽。
+2. `--tex KEY=FILE`，KEY 對到該 shape 的 diffuse 槽：槽路徑的檔名主幹（例如 `dress_d`），或 Data 相對全路徑。只給 `--tex FILE` 時，KEY 就是 FILE 的檔名主幹（整串就是一個存在的檔時，路徑裡有 `=` 也當 FILE），所以 `edit/dress_d.png` 會自動對到 `dress_d.dds` 那個槽。
 3. 有 `--data` 時，照 diffuse 槽的路徑去找（大小寫不敏感，依給的順序）。
 4. 都沒有：平塗色，記在 `missing_textures`。
 
@@ -66,11 +66,12 @@ PNG 與 DDS 都吃（DDS 交給 Pillow 解，只取最上層 mip）。`--tex` �
 
 ## 簡化了什麼
 
-- **打光**：Lambert，用幾何算出的頂點法線（不讀 NIF 存的法線，也不用法線圖），雙面（不做背面剔除）。光從相機的右上前方來，ambient 0.3。沒有陰影、高光、環境貼圖、rim light。
+- **打光**：Lambert，用幾何算出的頂點法線（不讀 NIF 存的法線，也不用法線圖），雙面（不做背面剔除）。光從畫面的左上前方來（front 時是角色的右上前方；相機座標 x' 正方向＝畫面左），ambient 0.3。沒有陰影、高光、環境貼圖、rim light。
 - **貼圖**：只畫 diffuse。取樣是最近鄰，UV 照 repeat 包回，不用 mip。貼圖超過 `--tex-max` 會先等比縮小。SkinTint／HairTint／FaceTint 的乘色、頂點色、glow、多層 shader 都不做，所以身體顏色是貼圖原色。
 - **alpha**：照 NiAlphaProperty 的兩個旗標。只有 test（0x200）時，alpha < threshold 的片段丟掉，test 函數一律當 GREATER_EQUAL。有 blend（0x1）時半透明疊色，alpha ≥ 230 當不透明寫深度；同時有 test 時先做 test。混合函數一律當 SRC_ALPHA／ONE_MINUS_SRC_ALPHA。blend 三角形每個視角在同一個 shape 內由遠到近排序，shape 之間照輸入順序，所以兩件半透明衣服交疊時可能前後顛倒。沒有 NiAlphaProperty 的 shape 不看貼圖 alpha。
 - **姿勢**：綁定姿勢（T／A pose），不套骨架、不做 BodySlide 體型。蒙皮 shape 照 `ai3dlib/geom.resolve_skinning` 對齊：每根骨以頂點最多的 shape 為參考。衣服跟身體的 NIF 若存在同一個模型空間，就會對齊。
 - **投影**：正交投影，沒有透視。
+- **光柵化**：頂點吸到 1/256 像素的格子，邊函數用整數算，配 top-left 填充規則：兩個三角形的共用邊上的像素只畫一次，半透明 shape 不會在接縫疊兩次色，也不會漏畫。不做反鋸齒。
 
 ## 限制
 

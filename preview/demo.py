@@ -4,14 +4,19 @@ OUT 底下：`in/`（合成 NIF／DDS）、`before/`（原貼圖的預覽）、`
 `edit/dress_d.png`（texedit 改好的貼圖）、`after/`（改後預覽，相機沿用 before 的 frame）、
 `compare.png`（上排改前、下排改後）、`demo.json`（摘要）。
 OUT 要嘛不存在／空夾，要嘛是 demo 寫過的夾（有 `demo.json`）。
+
+`unpack/`、`edit/` 是 texedit 用它自己的守門寫的（判 texedit 的准寫根，不是 `--out`），所以開工前先做三件事：
+OUT 要在 texedit 的准寫根裡（否則什麼都不寫就拒，不會寫到一半）；OUT 底下（demo 寫過的夾）不准有 symlink；
+`unpack/`、`edit/` 先用 preview 的 `--out` 守門建（realpath 必須在 OUT 底下）。
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from preview import render, synth
-from preview.paths import OutDir
+from preview.paths import OutDir, WriteGuardError
 
 DEMO_OPS = [
     # 上衣：保留明暗換成初音綠
@@ -38,13 +43,35 @@ def _compare(before: Path, after: Path):
     return im
 
 
+def _texedit_allows(out: Path) -> None:
+    from texedit import paths as tpaths
+    try:
+        tpaths.guard_write(out, "demo 的 --out（unpack/、edit/ 由 texedit 寫）")
+    except tpaths.WriteGuardError as e:
+        raise WriteGuardError(f"{e}（demo 中段由 texedit 寫，--out 也要在 texedit 的准寫根；"
+                              f"要另加請設 ${tpaths.WRITE_ROOTS_ENV}）") from None
+
+
+def _no_symlinks(out: Path) -> None:
+    for dirpath, dirnames, filenames in os.walk(out):          # 不跟進 symlink 夾，但會列出來
+        for name in sorted(dirnames + filenames):
+            p = Path(dirpath) / name
+            if p.is_symlink():
+                raise WriteGuardError(f"--out 底下的 {p} 是 symlink（→ {os.readlink(p)}），demo 拒寫："
+                                      "texedit 的寫入會跟著它落到 --out 外；換一個新的 --out")
+
+
 def run(out) -> dict:
     from texedit import edit, unpack                      # 改圖那一步用 texedit（同 repo）
 
     out = Path(out).expanduser()
     if out.exists() and out.is_dir() and any(out.iterdir()) and not (out / "demo.json").is_file():
         raise render.PreviewError(f"--out {out} 不是空夾，也不是 demo 寫過的夾（沒有 demo.json），拒絕")
+    _texedit_allows(out)
     od = OutDir(out)
+    _no_symlinks(od.path)
+    for sub in ("unpack", "edit"):                             # texedit 要寫的夾：先過 preview 的 --out 守門
+        od.guard.make_dirs(od.path / sub, "建夾")
     inp = {k: str(out / v) for k, v in synth.write_inputs(od.write_bytes, "in/").items()}
     nifs = [inp["body.nif"], inp["dress.nif"]]
     others = [inp["lace_d.dds"], inp["sash_d.dds"], inp["body_d.dds"]]
