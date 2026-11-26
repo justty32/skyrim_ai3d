@@ -1,0 +1,14 @@
+{
+  "AGENTS.md": {
+    "description": "agent 備忘與鐵律（公開 repo 不放原始素材、寫入白名單）；進 repo 先讀"
+  },
+  "CLAUDE.md": {
+    "description": "指標檔，指向 AGENTS.md"
+  },
+  "README.md": {
+    "description": "總覽：使用者許願、AI 改貼圖與模型；範圍與各部分狀態"
+  },
+  "tests": {
+    "description": "合成樣本測試"
+  }
+}

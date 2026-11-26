@@ -1,0 +1,4 @@
+# Shell scripts are executed by bash (WSL); keep LF.
+*.sh text eol=lf
+# Executable .py (shebang) run directly by WSL; keep LF.
+*.py text eol=lf
