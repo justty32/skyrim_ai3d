@@ -12,7 +12,8 @@ target（選區）：`{"shape": KEY 或名, "island": n 或 [n…]}`、`{"mask":
 被扣掉的區域保證不動（不會被 grow 長回去，feather 的柔邊也不會滲進去）；feather 會往選區外溢出約一個半徑。
 選區是空的（全黑、整塊在圖外、被 exclude 扣光）就拒絕（rc 2）。
 
-法線圖（layout 裡 `normal_map: true` 的貼圖）預設拒絕；清單寫明 `"allow_normal": true` 才准改。
+法線圖（layout 裡 `normal_map: true` 的貼圖）預設拒絕；清單寫明 `"allow_normal": true` 才准改。`base` 指到
+layout 裡的法線圖 PNG 也一樣；沒給 layout 時，`base` 檔名以 `_n`／`_msn` 結尾就當法線圖。
 
 op：
 - `fill`：`color`。
@@ -331,6 +332,22 @@ def load_ops(path) -> dict:
     return doc
 
 
+def _check_normal_base(doc: dict, bp: Path, layout, layout_dir) -> None:
+    """`base` 指到法線圖也要 allow_normal：等於 layout 裡任何一張 normal_map 的 PNG；沒給 layout 時照檔名
+    （`_n`／`_msn` 結尾，同 unpack 的判法）。"""
+    if doc.get("allow_normal") is True:
+        return
+    target = bp.resolve()
+    if layout is not None:
+        for key, t in layout.get("textures", {}).items():
+            if t.get("normal_map") and t.get("png") and (layout_dir / t["png"]).resolve() == target:
+                raise EditError(f"base 指到法線圖 {key}（layout 的 normal_map: true），預設不准改；"
+                                "真的要改，清單加 \"allow_normal\": true")
+    elif target.stem.lower().endswith(("_n", "_msn")):
+        raise EditError(f"base {bp.name} 看檔名是法線圖（_n／_msn 結尾），預設不准改；"
+                        "真的要改，清單加 \"allow_normal\": true")
+
+
 def run_ops(doc: dict, ops_dir: Path):
     """回 (結果 RGBA, 原圖 RGBA, ctx, 每步統計, layout)。"""
     layout = layout_dir = None
@@ -351,6 +368,7 @@ def run_ops(doc: dict, ops_dir: Path):
         bp = layout_dir / layout["textures"][tex]["png"]
     else:
         raise EditError("要給 base，或 layout＋texture（layout 裡有的貼圖 key）")
+    _check_normal_base(doc, bp, layout, layout_dir)
     base = load_rgba(bp)
     ctx = Ctx(ops_dir, layout, layout_dir, tex, base.size)
     ctx.inputs["base"] = sha_file(bp)

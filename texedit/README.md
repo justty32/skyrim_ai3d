@@ -32,10 +32,10 @@
 - `masks/<W>x<H>/<shape>.png`、`<shape>.i<k>.png`：shape 與各 island 的遮罩（灰階 L，255＝選中）。尺寸相同的貼圖共用同一份。
 - `layout.json`（`texedit-layout/1`）：
   - `textures.<key>`：來源、尺寸、DDS header、是不是法線圖、哪些 shape 用到哪個槽。
-  - `shapes[]`：`key`（`<nif 檔名>.<shape 名>`）、原名、貼圖槽、對不到貼圖的槽、UV 越界的三角形數。`islands[]` 有三角形數、UV 面積、`bbox_uv`、`centroid_uv`。`maps.<tex>` 是該貼圖上的遮罩路徑、像素數、`area_frac`、`bbox_px`，每個 island 各一份。
-  - `overlaps[]`：同一張貼圖上 shape 兩兩共用的 texel 數，以及同一 shape 內 island 兩兩共用的 texel 數（寫成 `<shape>#i<k>`）。鏡像或共用 UV 時（例如同一個 shape 裡左右護腕疊在同一塊 UV 上），改一邊另一邊也會跟著變，看這裡。
+  - `shapes[]`：`key`（`<nif 檔名>.<shape 名>`）、原名、貼圖槽、對不到貼圖的槽、UV 越界的三角形數。`islands[]` 有三角形數、UV 面積、`bbox_uv`、`centroid_uv`。`maps.<tex>` 是該貼圖上的遮罩路徑、像素數、`area_frac`、`bbox_px`，每個 island 各一份；island 那份另有 `self_overlap_px`：這個 island 自己疊自己的 texel 數（各三角形蓋到的 texel 加總減去聯集，疊兩層的各算 1；見下面的限制）。
+  - `overlaps[]`：同一張貼圖上 shape 兩兩共用的 texel 數，以及同一 shape 內 island 兩兩共用的 texel 數（寫成 `<shape>#i<k>`）。鏡像或共用 UV 時（例如同一個 shape 裡左右護腕疊在同一塊 UV 上），改一邊另一邊也會跟著變，看這裡。**限制**：只有分成兩個 island 的才會列在這裡；左右兩半在中線上相連的鏡像（中線頂點位置與 UV 都相同）會焊成同一個 island，`overlaps` 看不到，要看該 island 的 `self_overlap_px`（不是 0 就是自疊），再對照疊圖。
 
-慣例：像素 x＝u·W、y＝v·H（v＝0 在圖頂）；UV 越界照 repeat 包回。island 是三角形經共用頂點、或「3D 位置與 UV 都相同」的頂點連起來的連通塊：接縫兩邊拆開的頂點焊回同一塊；UV 疊在一起、3D 上不相連的兩片算兩塊，重疊列在 `overlaps`。編號照閱讀順序：由上而下、由左而右。
+慣例：像素 x＝u·W、y＝v·H（v＝0 在圖頂）；UV 越界照 repeat 包回。island 是三角形經共用頂點、或「3D 位置與 UV 都相同」的頂點連起來的連通塊：接縫兩邊拆開的頂點焊回同一塊；UV 疊在一起、3D 上不相連的兩片算兩塊，重疊列在 `overlaps`；相連的鏡像兩半仍是一塊（切法不改），自疊記在 `self_overlap_px`。編號照閱讀順序：由上而下、由左而右。
 
 ## 操作清單（`texedit-ops/1`）
 
@@ -56,12 +56,12 @@
 - op：`fill`、`gradient`、`pattern`、`decal`、`recolor`。
 - 混合 `blend`：normal、multiply、screen、overlay、colorize、color、hue。要保留原圖明暗只換顏色，用 `colorize`（把原圖灰階上色：中灰變成指定色）或 `color`（色相與飽和度換掉，明度不動）。
 - alpha 一律不動。
-- 法線圖（layout 裡 `normal_map: true`）預設拒絕；真的要改，清單頂層加 `"allow_normal": true`。
+- 法線圖（layout 裡 `normal_map: true`）預設拒絕；真的要改，清單頂層加 `"allow_normal": true`。用 `base` 指到 layout 裡的法線圖 PNG 也一樣擋；沒給 layout 時，`base` 檔名以 `_n`／`_msn` 結尾就當法線圖。
 
 ## agent 怎麼用：使用者給範例圖之後
 
 1. **拆開**：家裡跑 `unpack --data <Data 根> --nif <該件的 NIF 的 Data 相對路徑> --auto-tex --out ~/skyrim_mods/_staging-<日期>-texedit/<件>/unpack`（找資產的辦法見下一節）。
-2. **看 layout**：先看 `overlays/<tex>.all.png`，認出每個 shape 在貼圖上的位置；再看單 shape 疊圖上的 island 編號，對照 `layout.json` 的 `bbox_uv`、`area_frac`，說得出「裙子正面是 shape X 的 island 2」。先看 `overlaps`：有共用 texel 的部件改不開，要嘛 `exclude` 掉，要嘛接受兩邊一起變。
+2. **看 layout**：先看 `overlays/<tex>.all.png`，認出每個 shape 在貼圖上的位置；再看單 shape 疊圖上的 island 編號，對照 `layout.json` 的 `bbox_uv`、`area_frac`，說得出「裙子正面是 shape X 的 island 2」。先看 `overlaps`：有共用 texel 的部件改不開，要嘛 `exclude` 掉，要嘛接受兩邊一起變。再看各 island 的 `self_overlap_px`：不是 0 的，是同一塊裡自己疊自己（常見是左右鏡像半身在中線相連），改它等於左右一起改，疊圖上也分不開兩半。
 3. **對應範例圖**：把範例圖的部件對到 shape／island，挑出顏色（hex）。要用的花紋或標誌從範例圖裁成小 PNG，放在清單旁邊。
 4. **寫操作清單**：一個部件一兩步，先用 `colorize`／`color` 保留布紋明暗。邊緣有接縫露底色時，加 `grow: 1–2`。
 5. **edit**，然後看 `record.json` 的 `by_shape`。不該動的 shape 出現在裡面，就是溢色了，回第 4 步。`diff --out` 的標紅圖可以給使用者看。
@@ -83,6 +83,8 @@
 - 只改漫反射（diffuse）的顏色。alpha、網格不動；法線圖預設拒絕（見上）。改輪廓、無袖剪裁屬於網格的事（ai3d 的網格編輯部分）。
 - 遮罩是硬邊光柵化：只算中心落在三角形內的 texel（UV 上對接的兩塊不重疊），細到蓋不到任何中心的三角形至少畫一條線。貼圖的 mip 會從邊外取色，所以接縫可能露出原色，用 `grow` 補。
 - unpack 把每個 island 的遮罩都留在記憶體裡（2048² 一張約 4 MB），同 shape 內 island 兩兩比對是 O(n²)；island 上百的件會吃記憶體，還沒在真樣本量過。
+- island 的切法：左右鏡像的兩半在中線相連時算同一個 island（切法沒改），`overlaps` 不會列；看 `self_overlap_px` 與疊圖。`self_overlap_px` 不算退回畫線的細三角形。layout.json 頂層 `island_rule` 也寫了這條。
+- 光柵化是逐列掃描，耗時大約跟「列數 × 三角形數」成正比：合成網格 2 萬三角形 @ 2048² 約 2.5 s、8 萬 @ 2048² 約 5.5 s（開發機上量的，僅供量級參考）。
 - island 編號是照幾何算出來的，換一個 NIF 版本編號可能不同；操作清單寫的是 shape key 加 island 編號，換版本要重新 unpack，再核對一次。
 
 測試：`tests/test_texedit.py`（合成 NIF 與 DDS，只用 tempdir），在 repo 根跑 `python3 -m unittest discover -s tests -v`。

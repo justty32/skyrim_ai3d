@@ -668,5 +668,112 @@ class ReviewFixTest(Base):
         self.assertEqual(json.loads(out)["stale_files"], ["masks/128x128/dress.Top.i9.png"])
 
 
+# ---------------------------------------------------------------- 複審意見（rereview-texedit N1–N4）的修正
+
+def _coverage(shape, tri_indices, size):
+    """每個 texel 被幾個三角形蓋到中心（逐三角形掃描線，不經遮罩 OR），回 list[W*H]。"""
+    w, h = size
+    cnt = [0] * (w * h)
+    for ti in tri_indices:
+        for poly in uvmap.tri_pixels([shape.uvs[vi] for vi in shape.tris[ti]], size):
+            for j, i0, i1 in uvmap._spans(poly, w, h):
+                for i in range(i0, i1 + 1):
+                    cnt[j * w + i] += 1
+    return cnt
+
+
+class ReviewFix2Test(Base):
+    def setUp(self):
+        super().setUp()
+        self.L = self.do_unpack()
+        self.ops_dir = self.tmp / "ops"
+        self.ops_dir.mkdir()
+
+    def ops_file(self, ops, name="r", **extra):
+        doc = {"format": "texedit-ops/1", "layout": "../out/layout.json", "texture": "dress_d", "ops": ops, **extra}
+        doc = {k: v for k, v in doc.items() if v is not None}
+        p = self.ops_dir / (name + ".ops.json")
+        p.write_text(json.dumps(doc), "utf-8")
+        return p
+
+    # N2：半開邊界。兩塊在 texel 中心線上對接（u 或 v＝(k+0.5)/W），重疊 0、合起來鋪滿；
+    # 右緣含進去、或下緣那一列含進去，都會重複
+    def test_half_open_rule_on_texel_centres(self):
+        W, H = 16, 12
+        for k in (3, 7, 10):
+            cu = (k + 0.5) / W
+            cv = (k + 0.5) / H
+            for left, right in [((0.0, 0.0, cu, 1.0), (cu, 0.0, 1.0, 1.0)),
+                                ((0.0, 0.0, 1.0, cv), (0.0, cv, 1.0, 1.0))]:
+                uv_a, t_a = _quad(*left)
+                uv_b, t_b = _quad(*right)
+                a = uvmap.rasterize(_shape(uv_a, t_a), range(2), (W, H))
+                b = uvmap.rasterize(_shape(uv_b, t_b), range(2), (W, H))
+                self.assertEqual(uvmap.overlap_pixels(a, b), 0, (k, left))
+                self.assertEqual(a.histogram()[255] + b.histogram()[255], W * H, (k, left))
+        # 頂點正好在 texel 中心的小方塊：左／上含、右／下不含
+        m = uvmap.rasterize(_shape(*_quad(2.5 / 8, 2.5 / 8, 5.5 / 8, 5.5 / 8)), range(2), (8, 8))
+        self.assertEqual(m.getbbox(), (2, 2, 5, 5))     # 中心 2.5 在左／上緣上含、5.5 在右／下緣上不含
+        self.assertEqual(m.histogram()[255], 9)
+        # 中間那個頂點正好落在 texel 中心、且是該列右端：不能多含一格
+        tri = _shape([(0.5 / 8, 0.5 / 8), (4.5 / 8, 3.5 / 8), (0.5 / 8, 7.5 / 8)], [(0, 1, 2)])
+        cnt = _coverage(tri, [0], (8, 8))
+        self.assertEqual(cnt[3 * 8 + 4], 0)
+        self.assertEqual(cnt[3 * 8 + 3], 1)
+
+    # N4：共用邊在兩個三角形裡端點順序相反時，交點要每個 bit 都一樣（邊正好過 texel 中心時不重複、不漏）
+    def test_shared_edge_symmetric_on_texel_centre(self):
+        W = 100
+        A, B = (1 / 200, 1 / 200), (8 / 200, 57 / 200)      # 這條邊在 y=8.5 過 texel 中心 x=1.5，正反算差一個 ulp
+        Lp, Rp = (0.0, 0.3), (0.3, 0.005)
+        for tl, tr in [((0, 1, 2), (1, 0, 3)), ((0, 1, 2), (0, 1, 3)), ((1, 0, 2), (0, 1, 3))]:
+            sh = _shape([A, B, Lp, Rp], [tl, tr])
+            cnt = _coverage(sh, [0, 1], (W, W))
+            self.assertEqual(sum(c > 1 for c in cnt), 0, (tl, tr))
+            self.assertEqual(cnt[8 * W + 1], 1, (tl, tr))
+            a = uvmap.rasterize(sh, [0], (W, W))
+            b = uvmap.rasterize(sh, [1], (W, W))
+            self.assertEqual(uvmap.overlap_pixels(a, b), 0, (tl, tr))
+
+    # N3：用 base 指到法線圖的 PNG，一樣要 allow_normal；不給 layout 時照檔名（_n／_msn）判
+    def test_normal_map_via_base_refused(self):
+        op = [{"op": "fill", "target": {"rect_px": [0, 0, 8, 8]}, "color": "red"}]
+        cases = [("b1", {"base": "../out/textures/dress_n.png"}),
+                 ("b2", {"layout": None, "texture": None, "base": "../out/textures/dress_n.png"}),
+                 ("b3", {"base": str((self.tmp / "out" / "textures" / "dress_n.png").resolve())})]
+        for name, extra in cases:
+            p = self.ops_file(op, name=name, **extra)
+            rc, _o, err = run_cli(["edit", str(p), "--out", str(self.tmp / "ed" / f"{name}.png")])
+            self.assertEqual(rc, 2, (name, err))
+            self.assertIn("allow_normal", err)
+            self.assertFalse((self.tmp / "ed" / f"{name}.png").exists())
+            p = self.ops_file(op, name=name + "ok", allow_normal=True, **extra)
+            rc, _o, err = run_cli(["edit", str(p), "--out", str(self.tmp / "ed" / f"{name}ok.png")])
+            self.assertEqual(rc, 0, (name, err))
+        # diffuse 照樣可以用 base 指定
+        p = self.ops_file(op, name="d1", base="../out/textures/dress_d.png")
+        rc, _o, err = run_cli(["edit", str(p), "--out", str(self.tmp / "ed" / "d1.png")])
+        self.assertEqual(rc, 0, err)
+
+    # N1：鏡像左右兩半在中線相連 → 同一個 island，overlaps 看不到；改看 island 的 self_overlap_px
+    def test_connected_mirror_halves_self_overlap(self):
+        uL = [(0.2, 0.1), (0.5, 0.1), (0.5, 0.6), (0.2, 0.6)]
+        pL = [(-1, 0, 0), (0, 0, 0), (0, 0, -1), (-1, 0, -1)]
+        pR = [(1, 0, 0), (0, 0, 0), (0, 0, -1), (1, 0, -1)]
+        nif = self.tmp / "in" / "mirror.nif"
+        nif.write_bytes(synth.make_nif([{"name": "P", "uvs": uL + uL, "tris": [(0, 1, 2), (0, 2, 3), (4, 6, 5), (4, 7, 6)],
+                                         "verts": pL + pR, "textures": [synth.DRESS_D] + [""] * 8}]))
+        L = unpack([nif], [self.dds_d], self.tmp / "mir")
+        sh = L["shapes"][0]
+        self.assertEqual(len(sh["islands"]), 1)                 # 不改切法：中線焊成一塊
+        self.assertEqual([o for o in L["overlaps"] if o["a"].startswith("mirror.P")], [])
+        isl = sh["maps"]["dress_d"]["islands"][0]
+        self.assertEqual(isl["self_overlap_px"], isl["pixels"])   # 兩層完全疊：每個 texel 都被蓋兩次
+        # 一般的島（demo 洋裝）自疊是 0
+        for s in self.L["shapes"]:
+            for e in s["maps"]["dress_d"]["islands"]:
+                self.assertEqual(e["self_overlap_px"], 0, (s["key"], e["index"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -150,9 +150,13 @@ def unpack(nifs, textures, out, assign=None, overlay_lo: int = 512, overlay_hi: 
     paths.make_dirs(out)
     layout = {"format": FORMAT,
               "uv_convention": "x=u*W, y=v*H（v=0 在圖頂）；UV 越界照 repeat 包回",
+              "island_rule": "island＝共用頂點、或 3D 位置與 UV 都相同的頂點連起來的三角形；UV 疊在一起但 3D 不相連的"
+                             "兩片是兩個 island，重疊列在 overlaps。左右鏡像兩半在中線相連時是同一個 island，overlaps"
+                             " 看不到，看 maps.<tex>.islands[].self_overlap_px（各三角形蓋到的 texel 加總減聯集，非 0＝自疊）",
               "nifs": [str(p) for p in nifs], "textures": {}, "missing_textures": missing, "shapes": [],
               "overlaps": []}
     mask_cache: dict[tuple, object] = {}
+    self_ov: dict[tuple, int] = {}      # (shape, size, island) → island 內自疊的 texel 數
 
     def mask_of(s, size, isl=None):
         k = (s.key, size, None if isl is None else isl.index)
@@ -163,9 +167,10 @@ def unpack(nifs, textures, out, assign=None, overlay_lo: int = 512, overlay_hi: 
                 for x in s.islands[1:]:
                     m = ImageChops.lighter(m, mask_of(s, size, x))
                 mask_cache[k] = m
+            elif isl is None:
+                mask_cache[k] = uvmap.rasterize(s, range(len(s.tris)), size)
             else:
-                tris = range(len(s.tris)) if isl is None else isl.tris
-                mask_cache[k] = uvmap.rasterize(s, tris, size)
+                mask_cache[k], self_ov[k] = uvmap.rasterize(s, isl.tris, size, self_overlap=True)
         return mask_cache[k]
 
     written_sizes: set = set()
@@ -194,7 +199,8 @@ def unpack(nifs, textures, out, assign=None, overlay_lo: int = 512, overlay_hi: 
                 mi = mask_of(s, size, isl)
                 if (sz, s.key) not in written_sizes:
                     paths.write_png(out / rel_im, mi)
-                entry["islands"].append({"index": isl.index, "mask": rel_im, **uvmap.mask_stats(mi)})
+                entry["islands"].append({"index": isl.index, "mask": rel_im, **uvmap.mask_stats(mi),
+                                         "self_overlap_px": self_ov[(s.key, size, isl.index)]})
             written_sizes.add((sz, s.key))
             if not normal:
                 rel_ov = f"overlays/{tk}.{s.key}.png"

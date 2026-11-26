@@ -7,6 +7,8 @@ island＝三角形經「共用頂點 index」或「3D 位置與 UV 都相同（�
 但位置與 UV 都重合的，焊回同一塊；UV 疊在一起、但 3D 上不相連的（左右護腕、左右靴子這種疊 UV），算兩塊，
 重疊另報（unpack 的 `overlaps`）。沒給位置時（`positions=None`）只看 UV，疊 UV 的部件會被併成一塊。
 編號照閱讀順序（包圍盒由上而下、由左而右）。
+限制：左右鏡像的兩半若在中線上相連（中線頂點位置與 UV 都相同），會焊成同一個 island，自己疊自己不會出現在
+`overlaps`；unpack 另在每個 island 記 `self_overlap_px`（自疊的 texel 數，見 `rasterize`）。
 
 遮罩光柵化：texel i 的中心在 (i+0.5)/W；只填中心落在三角形內的 texel（掃描線、半開邊界），不加邊框；
 細到一個中心都蓋不到的三角形退回畫最長邊那條線（至少一像素）。
@@ -119,7 +121,9 @@ def _spans(poly, w, h):
     ys = [p[1] for p in poly]
     j0 = max(0, math.ceil(min(ys) - 0.5))
     j1 = min(h - 1, math.ceil(max(ys) - 0.5) - 1)
-    edges = [(poly[k], poly[(k + 1) % 3]) for k in range(3)]
+    # 端點先照 (y, x) 排序：共用邊在相鄰兩個三角形裡方向相反，不排序的話交點可能差一個 ulp，
+    # 邊正好過 texel 中心時就會一邊多含、一邊沒含（洞或重複）
+    edges = [tuple(sorted((poly[k], poly[(k + 1) % 3]), key=lambda q: (q[1], q[0]))) for k in range(3)]
     for j in range(j0, j1 + 1):
         y = j + 0.5
         xs = [a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
@@ -132,14 +136,19 @@ def _spans(poly, w, h):
             yield j, i0, i1
 
 
-def rasterize(shape: Shape, tri_indices, size):
+def rasterize(shape: Shape, tri_indices, size, self_overlap: bool = False):
     """選定三角形的遮罩（'L'，255＝選中）：texel 中心落在三角形內才算，不加邊框（PIL 的 polygon 會把頂點取整、
     邊上全含，所以自己掃描線）。一個中心都蓋不到的細三角形退回畫最長邊那條線，至少一像素。
-    要多涵蓋交給 edit 的 `grow`。"""
+    要多涵蓋交給 edit 的 `grow`。
+
+    self_overlap＝True 時回 (遮罩, 自疊 texel 數)：各三角形蓋到中心的 texel 數加總、減去聯集——這批三角形
+    自己疊自己的量（疊兩層的 texel 各算 1；例如左右鏡像半身在中線相連、UV 疊在一起）。退回畫線的細三角形不計。"""
     from PIL import Image, ImageDraw
     w, h = size
     im = Image.new("L", size, 0)
     d = ImageDraw.Draw(im)
+    total = 0
+    thin = []
     for ti in tri_indices:
         tri_uv = [shape.uvs[vi] for vi in shape.tris[ti]]
         hit = False
@@ -148,11 +157,17 @@ def rasterize(shape: Shape, tri_indices, size):
             for j, i0, i1 in _spans(poly, w, h):
                 d.line([(i0, j), (i1, j)], fill=255)
                 hit = True
+                total += i1 - i0 + 1
         if not hit:
-            for poly in polys:
-                a, b = max(((poly[k], poly[(k + 1) % 3]) for k in range(3)), key=lambda e: math.dist(*e))
-                d.line([(math.floor(a[0]), math.floor(a[1])), (math.floor(b[0]), math.floor(b[1]))], fill=255)
-    return im
+            thin.append(polys)
+    union = im.histogram()[255] if self_overlap else 0
+    for polys in thin:      # 細三角形最後畫：遮罩是聯集，先後不影響結果
+        for poly in polys:
+            a, b = max(((poly[k], poly[(k + 1) % 3]) for k in range(3)), key=lambda e: math.dist(*e))
+            d.line([(math.floor(a[0]), math.floor(a[1])), (math.floor(b[0]), math.floor(b[1]))], fill=255)
+    if not self_overlap:
+        return im
+    return im, total - union
 
 
 def mask_stats(mask) -> dict:
