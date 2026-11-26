@@ -9,7 +9,7 @@
 | 部分 | 內容 | 狀態 |
 |---|---|---|
 | [`texedit/`](texedit/README.md) | 貼圖編輯：DDS 拆成 PNG、各 shape 的 UV 疊圖與選區遮罩、照操作清單改圖、裝回 DDS。用法：repo 根 `python3 -m texedit demo --out DIR`，其餘見 [texedit/README](texedit/README.md) | 階段 0 靜態通過，待回家驗 |
-| 預覽 | 把衣服連貼圖畫成圖，改完不進遊戲先看 | 下一步 |
+| [`preview/`](preview/README.md) | 預覽：衣服（可加身體）連 diffuse 貼圖畫成正面／背面（可加側面）PNG，改完不進遊戲先看；吃 texedit `edit` 的輸出。用法：repo 根 `python3 -m preview demo --out DIR`，其餘見 [preview/README](preview/README.md) | 合成樣本測試通過，待回家驗 |
 | 網格編輯 | Blender 無頭腳本（`blender -b --python`）＋ PyNifly、Outfit Studio 6.2 的 MCP：無袖、貼身、修穿模、加配件 | 規劃中，工具只裝在家裡那台 |
 | AI 生成 | 在我們自己的 UV 上畫紋理（StableGen 一類）、配件草模（TripoSG 一類） | 規劃中，模型權重要使用者同意才下載 |
 

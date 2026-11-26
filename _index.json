@@ -11,6 +11,9 @@
   "ai3dlib": {
     "description": "共用函式庫：nif／dds／writeguard／geom（複製自私有工作區，檔頭記來源 commit）、paths（拒寫的根）、assets（--data 查找）"
   },
+  "preview": {
+    "description": "預覽：NIF＋diffuse 貼圖 → 正面／背面 PNG＋preview.json（可重跑）；`python3 -m preview`，用法見 preview/README.md"
+  },
   "tests": {
     "description": "合成樣本測試（texedit 23 條）；`python3 -m unittest discover -s tests -v`"
   },
