@@ -3,9 +3,13 @@
 慣例（同 head_render `sampler_from_image`）：像素 x＝u·W、y＝v·H（v＝0 在圖頂）。UV 越界照 repeat 包回：
 每個三角形先平移整數格讓最小 u／v 落在 [0,1)，跨出右／下緣的部分另畫一份平移 −1 的副本。
 
-island＝三角形經「共用頂點 index」或「UV 座標相同（量化到 1/65536）」連起來的連通塊——接縫上頂點被拆開
-但 UV 重合的，算同一塊；鏡像而 UV 疊在一起、但不相連的，算兩塊（重疊另報）。編號照閱讀順序（包圍盒由上而下、
-由左而右）。
+island＝三角形經「共用頂點 index」或「3D 位置與 UV 都相同（各自量化）」連起來的連通塊——接縫上頂點被拆開、
+但位置與 UV 都重合的，焊回同一塊；UV 疊在一起、但 3D 上不相連的（左右護腕、左右靴子這種疊 UV），算兩塊，
+重疊另報（unpack 的 `overlaps`）。沒給位置時（`positions=None`）只看 UV，疊 UV 的部件會被併成一塊。
+編號照閱讀順序（包圍盒由上而下、由左而右）。
+
+遮罩光柵化：texel i 的中心在 (i+0.5)/W；只填中心落在三角形內的 texel（掃描線、半開邊界），不加邊框；
+細到一個中心都蓋不到的三角形退回畫最長邊那條線（至少一像素）。
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ import math
 from dataclasses import dataclass, field
 
 QUANT = 65536
+POS_QUANT = 1e-4                 # 3D 位置焊接的量化格（模型單位）
 
 
 @dataclass
@@ -33,6 +38,7 @@ class Shape:
     uvs: list
     tris: list
     textures: list = field(default_factory=list)
+    positions: list | None = None    # 與 uvs 對齊的 3D 位置（島的焊接用）
     islands: list = field(default_factory=list)
     out_of_range_tris: int = 0       # 有頂點 UV 落在 [0,1] 外的三角形數
 
@@ -41,7 +47,7 @@ def _tri_area(a, b, c) -> float:
     return abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2
 
 
-def find_islands(uvs, tris) -> list[Island]:
+def find_islands(uvs, tris, positions=None) -> list[Island]:
     parent = list(range(len(tris)))
 
     def find(x):
@@ -63,6 +69,8 @@ def find_islands(uvs, tris) -> list[Island]:
             union(j, ti)
             u, v = uvs[vi]
             q = (round(u * QUANT), round(v * QUANT))
+            if positions is not None:
+                q += tuple(round(c / POS_QUANT) for c in positions[vi])
             j = first_by_uv.setdefault(q, ti)
             union(j, ti)
     groups: dict[int, list] = {}
@@ -100,19 +108,50 @@ def _copies(tri_uv):
 
 
 def tri_pixels(tri_uv, size):
+    """疊圖畫線用的像素座標（u·W, v·H）。"""
     w, h = size
     return [[(u * w, v * h) for u, v in c] for c in _copies(tri_uv)]
 
 
+def _spans(poly, w, h):
+    """三角形（像素座標 x＝u·W、y＝v·H）蓋到中心的 texel：逐列回 (y, x0, x1)（含兩端）。
+    texel (i, j) 的中心在 (i+0.5, j+0.5)；邊界用半開區間（左／上含、右／下不含），對接的兩塊不重複、也不漏。"""
+    ys = [p[1] for p in poly]
+    j0 = max(0, math.ceil(min(ys) - 0.5))
+    j1 = min(h - 1, math.ceil(max(ys) - 0.5) - 1)
+    edges = [(poly[k], poly[(k + 1) % 3]) for k in range(3)]
+    for j in range(j0, j1 + 1):
+        y = j + 0.5
+        xs = [a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+              for a, b in edges if a[1] != b[1] and min(a[1], b[1]) <= y < max(a[1], b[1])]
+        if len(xs) < 2:
+            continue
+        i0 = max(0, math.ceil(min(xs) - 0.5))
+        i1 = min(w - 1, math.ceil(max(xs) - 0.5) - 1)
+        if i0 <= i1:
+            yield j, i0, i1
+
+
 def rasterize(shape: Shape, tri_indices, size):
-    """選定三角形的遮罩（'L'，255＝選中）。邊上的像素也算（polygon 加 outline），細三角形至少一像素。"""
+    """選定三角形的遮罩（'L'，255＝選中）：texel 中心落在三角形內才算，不加邊框（PIL 的 polygon 會把頂點取整、
+    邊上全含，所以自己掃描線）。一個中心都蓋不到的細三角形退回畫最長邊那條線，至少一像素。
+    要多涵蓋交給 edit 的 `grow`。"""
     from PIL import Image, ImageDraw
+    w, h = size
     im = Image.new("L", size, 0)
     d = ImageDraw.Draw(im)
     for ti in tri_indices:
         tri_uv = [shape.uvs[vi] for vi in shape.tris[ti]]
-        for poly in tri_pixels(tri_uv, size):
-            d.polygon(poly, fill=255, outline=255)
+        hit = False
+        polys = tri_pixels(tri_uv, size)
+        for poly in polys:
+            for j, i0, i1 in _spans(poly, w, h):
+                d.line([(i0, j), (i1, j)], fill=255)
+                hit = True
+        if not hit:
+            for poly in polys:
+                a, b = max(((poly[k], poly[(k + 1) % 3]) for k in range(3)), key=lambda e: math.dist(*e))
+                d.line([(math.floor(a[0]), math.floor(a[1])), (math.floor(b[0]), math.floor(b[1]))], fill=255)
     return im
 
 

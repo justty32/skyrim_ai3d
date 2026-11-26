@@ -17,13 +17,15 @@
 | 子命令 | 做什麼 |
 |---|---|
 | `unpack --nif N [--nif …] (--tex T … \| --auto-tex) --out DIR [--data D …] [--assign SHAPE=TEXKEY]` | 拆開。給 `--data` 時 NIF 與貼圖可給 Data 相對路徑（依序找，大小寫不敏感）；`--auto-tex` 照 NIF 的貼圖槽去找貼圖，找不到的記在 `missing_textures` |
-| `edit OPS.json --out X.png` | 照清單改，另寫 `X.png.record.json` |
-| `replay X.png.record.json` | 重跑並比對輸出像素的 sha256；也列出哪個輸入檔變了（rc 1＝對不上） |
+| `edit OPS.json --out X.png [--strict]` | 照清單改，另寫 `X.png.record.json`。選區是空的就拒絕（rc 2）；某步一個像素都沒改會列在 `warnings`，加 `--strict` 時 rc 1 |
+| `replay X.png.record.json` | 重跑並比對輸出像素的 sha256；也列出哪個輸入檔變了（rc 1＝對不上）。Pillow 版本跟記錄的不同時在 `warnings` 提示 |
 | `diff A.png B.png [--layout L --texture K] [--out d.png]` | 列出變動像素、各 shape／island 被改了多少，並出一張把變動處標紅的圖 |
 | `pack X.png --ref 原圖 --out Y.dds [--fail-on-alpha \| --restore-alpha] [--report R.json]` | 裝回。尺寸不同就不寫；報告列出 alpha 變動的像素數 |
 | `demo --out DIR` | 用合成洋裝（`synth.py`）把整條流程走一遍 |
 
 ## unpack 的輸出
+
+`--out` 要給新夾（不存在或空的），或 texedit 之前寫過的夾（裡面有 `layout.json`，例如第二輪加 `--data` 重跑）；別的非空夾拒絕。重跑到同一夾時，舊 layout 列過、這次沒再產出的檔不刪，列在 `layout.json` 與 stdout 的 `stale_files`。
 
 - `textures/<tex>.png`：RGBA 原尺寸，只取最上層 mip。法線圖照原樣轉，不做色彩處理。
 - `overlays/<tex>.all.png`：所有 shape 的 UV 線框疊在壓暗的貼圖上，每個 shape 一色，附圖例。`overlays/<tex>.<shape>.png` 只畫一個 shape，並在每個 island 中心標編號（法線圖不出這種單 shape 圖）。疊圖最長邊會縮放到 512–2048；遮罩維持原尺寸。
@@ -31,9 +33,9 @@
 - `layout.json`（`texedit-layout/1`）：
   - `textures.<key>`：來源、尺寸、DDS header、是不是法線圖、哪些 shape 用到哪個槽。
   - `shapes[]`：`key`（`<nif 檔名>.<shape 名>`）、原名、貼圖槽、對不到貼圖的槽、UV 越界的三角形數。`islands[]` 有三角形數、UV 面積、`bbox_uv`、`centroid_uv`。`maps.<tex>` 是該貼圖上的遮罩路徑、像素數、`area_frac`、`bbox_px`，每個 island 各一份。
-  - `overlaps[]`：同一張貼圖上 shape 兩兩共用的 texel 數，以及同一 shape 內 island 兩兩共用的 texel 數。鏡像或共用 UV 時，改一邊另一邊也會跟著變，看這裡。
+  - `overlaps[]`：同一張貼圖上 shape 兩兩共用的 texel 數，以及同一 shape 內 island 兩兩共用的 texel 數（寫成 `<shape>#i<k>`）。鏡像或共用 UV 時（例如同一個 shape 裡左右護腕疊在同一塊 UV 上），改一邊另一邊也會跟著變，看這裡。
 
-慣例：像素 x＝u·W、y＝v·H（v＝0 在圖頂）；UV 越界照 repeat 包回。island 是三角形經共用頂點、或 UV 座標相同而連起來的連通塊（接縫兩邊拆開的頂點算同一塊）。編號照閱讀順序：由上而下、由左而右。
+慣例：像素 x＝u·W、y＝v·H（v＝0 在圖頂）；UV 越界照 repeat 包回。island 是三角形經共用頂點、或「3D 位置與 UV 都相同」的頂點連起來的連通塊：接縫兩邊拆開的頂點焊回同一塊；UV 疊在一起、3D 上不相連的兩片算兩塊，重疊列在 `overlaps`。編號照閱讀順序：由上而下、由左而右。
 
 ## 操作清單（`texedit-ops/1`）
 
@@ -50,10 +52,11 @@
    "scale": 0.8, "rotate": 10, "opacity": 0.9}]}
 ```
 
-- 選區：`shape`＋`island`、`mask`、`rect_px`／`rect_uv`、`all`；也可以寫成 list 取聯集。另有 `exclude`（扣掉）、`grow`（往外擴幾個像素，負數往內縮）、`feather`（模糊邊緣）。
+- 選區：`shape`＋`island`、`mask`、`rect_px`／`rect_uv`、`all`；也可以寫成 list 取聯集。另有 `grow`（往外擴幾個像素，負數往內縮）、`feather`（模糊邊緣，會往外溢出約一個半徑）、`exclude`（扣掉）。順序固定是先 grow、再 feather、最後扣 exclude，所以被 `exclude` 的區域保證不動。選區是空的（全黑、在圖外、被扣光）會被拒絕。
 - op：`fill`、`gradient`、`pattern`、`decal`、`recolor`。
 - 混合 `blend`：normal、multiply、screen、overlay、colorize、color、hue。要保留原圖明暗只換顏色，用 `colorize`（把原圖灰階上色：中灰變成指定色）或 `color`（色相與飽和度換掉，明度不動）。
 - alpha 一律不動。
+- 法線圖（layout 裡 `normal_map: true`）預設拒絕；真的要改，清單頂層加 `"allow_normal": true`。
 
 ## agent 怎麼用：使用者給範例圖之後
 
@@ -77,8 +80,9 @@
 
 ## 限制
 
-- 只改漫反射（diffuse）的顏色。法線圖、alpha、網格都不動。改輪廓、無袖剪裁屬於網格的事（ai3d 的網格編輯部分）。
-- 遮罩是「三角形加邊框」的硬邊光柵化，貼圖的 mip 會從邊外取色，所以接縫可能露出原色，用 `grow` 補。
+- 只改漫反射（diffuse）的顏色。alpha、網格不動；法線圖預設拒絕（見上）。改輪廓、無袖剪裁屬於網格的事（ai3d 的網格編輯部分）。
+- 遮罩是硬邊光柵化：只算中心落在三角形內的 texel（UV 上對接的兩塊不重疊），細到蓋不到任何中心的三角形至少畫一條線。貼圖的 mip 會從邊外取色，所以接縫可能露出原色，用 `grow` 補。
+- unpack 把每個 island 的遮罩都留在記憶體裡（2048² 一張約 4 MB），同 shape 內 island 兩兩比對是 O(n²)；island 上百的件會吃記憶體，還沒在真樣本量過。
 - island 編號是照幾何算出來的，換一個 NIF 版本編號可能不同；操作清單寫的是 shape key 加 island 編號，換版本要重新 unpack，再核對一次。
 
 測試：`tests/test_texedit.py`（合成 NIF 與 DDS，只用 tempdir），在 repo 根跑 `python3 -m unittest discover -s tests -v`。

@@ -7,8 +7,12 @@
      "ops": [{"op": "fill", "target": {"shape": "dress.Top", "island": 0}, "color": "#1E90C8"}, ...]}
 
 target（選區）：`{"shape": KEY 或名, "island": n 或 [n…]}`、`{"mask": "x.png"}`、`{"rect_px": [x0,y0,x1,y1]}`、
-`{"rect_uv": [u0,v0,u1,v1]}`、`{"all": true}`；也可以是 list（聯集）。另可加 `exclude`（同格式，扣掉）、
-`grow`（像素，負數＝內縮）、`feather`（高斯模糊半徑）。
+`{"rect_uv": [u0,v0,u1,v1]}`、`{"all": true}`；也可以是 list（聯集）。另可加 `grow`（像素，負數＝內縮）、
+`feather`（高斯模糊半徑）、`exclude`（同格式，扣掉）。順序固定：先 grow、再 feather、最後扣 exclude——
+被扣掉的區域保證不動（不會被 grow 長回去，feather 的柔邊也不會滲進去）；feather 會往選區外溢出約一個半徑。
+選區是空的（全黑、整塊在圖外、被 exclude 扣光）就拒絕（rc 2）。
+
+法線圖（layout 裡 `normal_map: true` 的貼圖）預設拒絕；清單寫明 `"allow_normal": true` 才准改。
 
 op：
 - `fill`：`color`。
@@ -20,8 +24,9 @@ op：
 每個 op 都可加 `opacity`（0–1）與 `blend`：normal（預設；recolor 預設 color）、multiply、screen、overlay、
 colorize（原圖灰階經「黑→色→白」上色）、color（色相＋飽和度取新色、明度取原圖）、hue（只換色相）。
 
-輸出：OUT PNG＋`OUT.record.json`（清單全文、每個輸入的 sha256、每步改了幾個像素、各 shape／island 被改的像素數、
-輸出像素 sha256），`replay` 用它重放比對。
+輸出：OUT PNG＋`OUT.record.json`（清單全文、清單檔的絕對路徑、每個輸入的 sha256、每步改了幾個像素、
+各 shape／island 被改的像素數、輸出像素 sha256、Pillow 版本、`warnings`），`replay` 用它重放比對。
+選區不空、卻一個像素都沒改的步驟（例如填了跟原色一樣的顏色）記進 `warnings`；CLI 加 `--strict` 時 rc 1。
 """
 from __future__ import annotations
 
@@ -151,8 +156,7 @@ def target_mask(ctx: Ctx, t) -> "object":
     else:
         raise EditError(f"target 要有 shape／mask／rect_px／rect_uv／all 之一：{t!r}")
     if isinstance(t, dict):
-        if t.get("exclude") is not None:
-            out = ImageChops.subtract(out, target_mask(ctx, t["exclude"]))
+        # 順序：grow → feather → exclude（扣掉的區域保證不動）
         g = int(t.get("grow", 0))
         if g:
             f = ImageFilter.MaxFilter(3) if g > 0 else ImageFilter.MinFilter(3)
@@ -160,6 +164,8 @@ def target_mask(ctx: Ctx, t) -> "object":
                 out = out.filter(f)
         if t.get("feather"):
             out = out.filter(ImageFilter.GaussianBlur(float(t["feather"])))
+        if t.get("exclude") is not None:
+            out = ImageChops.subtract(out, target_mask(ctx, t["exclude"]))
     return out
 
 
@@ -275,7 +281,9 @@ def paint_decal(ctx, op, size):
     else:
         raise EditError("decal 要給 center 或 center_uv")
     out = Image.new("RGBA", size, (0, 0, 0, 0))
-    out.paste(img, (round(cx - img.size[0] / 2), round(cy - img.size[1] / 2)), img)
+    # 畫布全透明：直接貼（RGBA 原樣抄進去、負座標照樣裁），不拿 img 自己當遮罩——那會讓 RGB 與 A
+    # 都再乘一次 a/255（alpha 變平方、半透明邊變暗）。縮放與 rotate 在 Pillow 裡已先轉 premultiplied 再算。
+    out.paste(img, (round(cx - img.size[0] / 2), round(cy - img.size[1] / 2)))
     return out
 
 
@@ -290,7 +298,7 @@ def apply_op(ctx: Ctx, cur, op: dict):
     mask = target_mask(ctx, op["target"])
     bbox = mask.getbbox()
     if bbox is None:
-        return cur
+        raise EditError(f"選區是空的（一個像素都沒選到）：{op['target']!r}")
     size = cur.size
     if kind in ("fill", "recolor"):
         paint = Image.new("RGBA", size, parse_color(op["color"]) + (255,))
@@ -332,6 +340,10 @@ def run_ops(doc: dict, ops_dir: Path):
         layout = json.loads(lp.read_text("utf-8"))
         layout_dir = lp.parent
     tex = doc.get("texture")
+    if layout is not None and layout.get("textures", {}).get(tex, {}).get("normal_map") \
+            and doc.get("allow_normal") is not True:
+        raise EditError(f"貼圖 {tex} 是法線圖（layout 的 normal_map: true），預設不准改；"
+                        "真的要改，清單加 \"allow_normal\": true")
     if doc.get("base"):
         bp = Path(doc["base"])
         bp = bp if bp.is_absolute() else ops_dir / bp
@@ -356,6 +368,8 @@ def run_ops(doc: dict, ops_dir: Path):
         except (TypeError, ValueError) as e:
             raise EditError(f"ops[{i}]（{op.get('op')}）：欄位值不對：{e}") from None
         steps.append({"i": i, "op": op.get("op"), "changed_pixels": rgb_changed(cur, nxt)})
+        if steps[-1]["changed_pixels"] == 0:
+            steps[-1]["warning"] = "選區不空，但一個像素都沒改（顏色跟原圖一樣？）"
         cur = nxt
     out = cur.convert("RGBA")
     out.putalpha(base.getchannel("A"))
@@ -386,30 +400,45 @@ def per_shape_changes(layout, texture, layout_dir, before, after) -> dict:
     return out
 
 
+def pillow_version() -> str:
+    import PIL
+    return PIL.__version__
+
+
+def step_warnings(steps) -> list[str]:
+    return [f"ops[{s['i']}]（{s['op']}）：{s['warning']}" for s in steps if s.get("warning")]
+
+
 def edit(ops_path, out_png) -> dict:
-    ops_path = Path(ops_path)
+    ops_path = Path(ops_path).resolve()
     doc = load_ops(ops_path)
     out_img, base, ctx, steps, layout = run_ops(doc, ops_path.parent)
     paths.write_png(out_png, out_img)
     rec = {"format": RECORD, "ops_file": str(ops_path), "ops": doc, "inputs": ctx.inputs, "steps": steps,
            "changed_pixels": rgb_changed(base, out_img),
            "by_shape": per_shape_changes(layout, ctx.texture, ctx.layout_dir, base, out_img),
-           "output": str(out_png), "output_pixels_sha256": sha_pixels(out_img)}
+           "output": str(out_png), "output_pixels_sha256": sha_pixels(out_img),
+           "pillow": pillow_version(), "warnings": step_warnings(steps)}
     paths.write_text(Path(str(out_png) + ".record.json"), json.dumps(rec, ensure_ascii=False, indent=1) + "\n")
     return rec
 
 
 def replay(record_path) -> dict:
-    """照 record 裡的清單全文重跑（相對路徑以原清單檔的夾為準），比輸入與輸出像素 sha256。不寫檔。"""
+    """照 record 裡的清單全文重跑（相對路徑以原清單檔的夾為準；新 record 存的是絕對路徑，換 cwd 也找得到），
+    比輸入與輸出像素 sha256；Pillow 版本跟記錄不同時在 warnings 提示。不寫檔。"""
     rec = json.loads(Path(record_path).read_text("utf-8"))
     if rec.get("format") != RECORD:
         raise EditError(f"{record_path}：format 要是 {RECORD}")
     out_img, _base, ctx, steps, _l = run_ops(rec["ops"], Path(rec["ops_file"]).parent)
     got = sha_pixels(out_img)
     changed_inputs = sorted(k for k, v in rec["inputs"].items() if ctx.inputs.get(k) != v)
+    warnings = step_warnings(steps)
+    if rec.get("pillow") != pillow_version():
+        warnings.append(f"Pillow 版本不同（記錄 {rec.get('pillow')}、現在 {pillow_version()}）：LANCZOS、GaussianBlur 等"
+                        "不保證每個 byte 一樣，same_output 是 false 時先看這條")
     return {"same_output": got == rec["output_pixels_sha256"], "output_pixels_sha256": got,
             "recorded": rec["output_pixels_sha256"], "changed_inputs": changed_inputs,
-            "steps": steps}
+            "steps": steps, "warnings": warnings}
 
 
 def diff(a_png, b_png, layout_path=None, texture=None, out_png=None) -> dict:

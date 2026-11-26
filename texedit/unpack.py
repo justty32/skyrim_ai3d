@@ -7,6 +7,10 @@
 - `masks/<W>x<H>/<shape>.png`、`<shape>.i<k>.png`：shape 與各 island 的遮罩（'L'，255＝選中）；同尺寸的貼圖共用。
 - `layout.json`：格式 `texedit-layout/1`，欄位見 README。
 
+OUT 要嘛不存在／是空夾，要嘛是 texedit 寫過的夾（裡面有 `layout.json`）；別的非空夾拒絕。重跑到同一夾時，
+舊 layout 列過、這次沒再產出的檔（例如 island 變少留下的 `*.i<k>.png`）不刪，列在 `stale_files`。
+寫任何東西之前先檢查 `layout.json` 本身能不能寫（symlink／硬連結／白名單），免得中途被拒留下一半新產物。
+
 貼圖對 shape：DDS 檔名（不分大小寫）等於 shape 某個貼圖槽路徑的檔名就算用到；對不上的用 `assign` 補
 （shape key 或 shape 名 → 貼圖 key）。
 """
@@ -72,9 +76,10 @@ def load_shapes(nif_paths, assets=None) -> list[uvmap.Shape]:
             if not m.uvs:
                 continue
             key = _unique(f"{safe(p.stem)}.{safe(m.name)}", taken)
+            pos = list(m.positions) if m.positions and len(m.positions) == len(m.uvs) else None
             s = uvmap.Shape(key, str(p), m.name, m.kind, list(m.uvs), [tuple(t) for t in m.triangles],
-                            list(m.textures))
-            s.islands = uvmap.find_islands(s.uvs, s.tris)
+                            list(m.textures), pos)
+            s.islands = uvmap.find_islands(s.uvs, s.tris, s.positions)
             s.out_of_range_tris = uvmap.out_of_range(s)
             out.append(s)
     return out
@@ -94,6 +99,7 @@ def unpack(nifs, textures, out, assign=None, overlay_lo: int = 512, overlay_hi: 
     assets：`ai3dlib.assets.AssetInputs`（--data），NIF 與貼圖可給 Data 相對路徑；auto_tex：
     再把 shape 貼圖槽列的貼圖全找來（找不到的記在 layout 的 missing_textures，不中斷）。"""
     out = Path(out)
+    old_files = _check_out_dir(out)
     shapes = load_shapes(nifs, assets)
     if not shapes:
         raise UnpackError("NIF 裡沒有帶 UV 的 shape")
@@ -151,8 +157,15 @@ def unpack(nifs, textures, out, assign=None, overlay_lo: int = 512, overlay_hi: 
     def mask_of(s, size, isl=None):
         k = (s.key, size, None if isl is None else isl.index)
         if k not in mask_cache:
-            tris = range(len(s.tris)) if isl is None else isl.tris
-            mask_cache[k] = uvmap.rasterize(s, tris, size)
+            if isl is None and s.islands:   # shape 遮罩＝各 island 的聯集（同一批三角形，不用再光柵化一次）
+                from PIL import ImageChops
+                m = mask_of(s, size, s.islands[0])
+                for x in s.islands[1:]:
+                    m = ImageChops.lighter(m, mask_of(s, size, x))
+                mask_cache[k] = m
+            else:
+                tris = range(len(s.tris)) if isl is None else isl.tris
+                mask_cache[k] = uvmap.rasterize(s, tris, size)
         return mask_cache[k]
 
     written_sizes: set = set()
@@ -219,8 +232,43 @@ def unpack(nifs, textures, out, assign=None, overlay_lo: int = 512, overlay_hi: 
                          "bbox_uv": [round(x, 6) for x in i.bbox_uv],
                          "centroid_uv": [round(x, 6) for x in i.centroid_uv]} for i in s.islands],
             "maps": shape_maps[s.key]})
+    new_files = _layout_files(layout)
+    layout["stale_files"] = sorted(f for f in old_files - new_files if (out / f).exists())
     paths.write_text(out / "layout.json", json.dumps(layout, ensure_ascii=False, indent=1) + "\n")
     return layout
+
+
+def _layout_files(layout) -> set:
+    """layout 列到的所有產物相對路徑。"""
+    fs = set()
+    for t in layout.get("textures", {}).values():
+        fs.update(x for x in (t.get("png"), t.get("overlay_all")) if x)
+    for s in layout.get("shapes", []):
+        for m in s.get("maps", {}).values():
+            fs.update(x for x in (m.get("mask"), m.get("overlay")) if x)
+            fs.update(e["mask"] for e in m.get("islands", []) if e.get("mask"))
+    return fs
+
+
+def _check_out_dir(out: Path) -> set:
+    """OUT 要不存在、是空夾，或有 layout.json（texedit 寫過）；先檢查 layout.json 能寫。回舊 layout 列過的檔。"""
+    paths.GUARD.check_target(out / "layout.json", "寫入")
+    if not out.exists():
+        return set()
+    if not out.is_dir():
+        raise UnpackError(f"--out {out} 不是資料夾")
+    lp = out / "layout.json"
+    if not lp.is_file():
+        if any(out.iterdir()):
+            raise UnpackError(f"--out {out} 不是空夾、也不是 texedit 寫過的夾（沒有 layout.json）；給新夾")
+        return set()
+    try:
+        old = json.loads(lp.read_text("utf-8"))
+    except (OSError, ValueError):
+        raise UnpackError(f"{lp} 讀不懂，不是 texedit 寫的？給新夾") from None
+    if old.get("format") != FORMAT:
+        raise UnpackError(f"{lp} 的 format 不是 {FORMAT}；給新夾")
+    return _layout_files(old)
 
 
 def _bbox_meet(a, b) -> bool:

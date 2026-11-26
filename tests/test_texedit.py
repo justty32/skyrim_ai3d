@@ -462,5 +462,211 @@ class DemoTest(Base):
         self.assertTrue(edit.replay(self.tmp / "demo" / "edit" / "dress_d.png.record.json")["same_output"])
 
 
+# ---------------------------------------------------------------- 審查意見（review-texedit）的修正，每條一測
+
+
+def _quad(u0, v0, u1, v1, base=0):
+    return [(u0, v0), (u1, v0), (u0, v1), (u1, v1)], [(base, base + 1, base + 3), (base, base + 3, base + 2)]
+
+
+def _shape(uvs, tris):
+    return uvmap.Shape("t.x", "t.nif", "x", "BSTriShape", uvs, tris)
+
+
+class ReviewFixTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.L = self.do_unpack()
+        self.ops_dir = self.tmp / "ops"
+        self.ops_dir.mkdir()
+
+    def ops_file(self, ops, name="r", **extra):
+        doc = {"format": "texedit-ops/1", "layout": "../out/layout.json", "texture": "dress_d", "ops": ops, **extra}
+        p = self.ops_dir / (name + ".ops.json")
+        p.write_text(json.dumps(doc), "utf-8")
+        return p
+
+    def ctx(self):
+        return edit.Ctx(self.ops_dir, self.L, self.tmp / "out", "dress_d", (S, S))
+
+    # 擋 1：decal 半透明像素照 alpha 混合，不是 alpha 平方、RGB 壓暗
+    def test_decal_half_alpha_blends_normally(self):
+        Image.new("RGBA", (6, 6), (255, 255, 255, 128)).save(self.ops_dir / "half.png")
+        p = self.ops_file([{"op": "decal", "target": {"all": True}, "image": "half.png", "center": [40, 40]}])
+        edit.edit(p, self.tmp / "ed" / "half.png")
+        im = _img(self.tmp / "ed" / "half.png")
+        for x, y in ((38, 38), (41, 40)):
+            o = self.d_im.getpixel((x, y))
+            got = im.getpixel((x, y))
+            for k in range(3):
+                self.assertAlmostEqual(got[k], o[k] + (255 - o[k]) * 128 / 255, delta=1.5, msg=(x, y, got, o))
+
+    def test_decal_rotated_edges_not_darkened(self):
+        w = Image.new("RGBA", (16, 16), (0, 0, 0, 0))                    # 透明框裡一塊白：轉了以後邊是半透明
+        w.paste((255, 255, 255, 255), (3, 3, 13, 13))
+        w.save(self.ops_dir / "w.png")
+        p = self.ops_file([{"op": "decal", "target": {"all": True}, "image": "w.png", "center": [64, 64],
+                            "rotate": 15}])
+        edit.edit(p, self.tmp / "ed" / "w.png")
+        im = _img(self.tmp / "ed" / "w.png")
+        darker = [(x, y) for y in range(48, 81) for x in range(48, 81)
+                  if any(im.getpixel((x, y))[k] < self.d_im.getpixel((x, y))[k] for k in range(3))]
+        self.assertEqual(darker, [])                                     # 白色疊上去只會變亮
+
+    # 擋 2：空選區拒絕；不空卻沒改像素的步驟記 warnings，--strict 時 rc 1
+    def test_empty_selection_refused(self):
+        for i, tgt in enumerate([{"rect_px": [200, 200, 220, 220]}, {"shape": "Top", "exclude": {"shape": "Top"}}]):
+            p = self.ops_file([{"op": "fill", "target": tgt, "color": "red"}], name=f"empty{i}")
+            rc, _o, err = run_cli(["edit", str(p), "--out", str(self.tmp / "ed" / f"e{i}.png")])
+            self.assertEqual(rc, 2, err)
+            self.assertIn("選區是空的", err)
+            self.assertFalse((self.tmp / "ed" / f"e{i}.png").exists())
+
+    def test_noop_step_warns_and_strict(self):
+        same = "#%02x%02x%02x" % self.d_im.getpixel((0, 0))[:3]
+        p = self.ops_file([{"op": "fill", "target": {"rect_px": [0, 0, 1, 1]}, "color": same},
+                           {"op": "fill", "target": {"rect_px": [4, 4, 6, 6]}, "color": "red"}])
+        rc, out, err = run_cli(["edit", str(p), "--out", str(self.tmp / "ed" / "n.png")])
+        self.assertEqual(rc, 0, err)
+        r = json.loads(out)
+        self.assertEqual(len(r["warnings"]), 1)
+        self.assertIn("ops[0]", r["warnings"][0])
+        rec = json.loads((self.tmp / "ed" / "n.png.record.json").read_text("utf-8"))
+        self.assertEqual(rec["warnings"], r["warnings"])
+        rc, _o, err = run_cli(["edit", str(p), "--out", str(self.tmp / "ed" / "n2.png"), "--strict"])
+        self.assertEqual(rc, 1, err)
+        good = self.ops_file([{"op": "fill", "target": {"rect_px": [4, 4, 6, 6]}, "color": "red"}], name="g")
+        self.assertEqual(run_cli(["edit", str(good), "--out", str(self.tmp / "ed" / "g.png"), "--strict"])[0], 0)
+
+    # 擋 3：同 shape 裡 UV 疊在一起、3D 不相連的兩片算兩塊，重疊列進 overlaps；接縫照位置＋UV 焊回
+    def test_islands_split_stacked_uv_by_position(self):
+        uv_a, t_a = _quad(0.1, 0.1, 0.4, 0.4)
+        uv_b, t_b = _quad(0.1, 0.1, 0.4, 0.4, base=4)
+        pos = [(u, 0.0, -v) for u, v in uv_a] + [(u + 5.0, 0.0, -v) for u, v in uv_a]   # 右邊那片在 x+5
+        self.assertEqual(len(uvmap.find_islands(uv_a + uv_b, t_a + t_b, pos)), 2)
+        # 只在一個 UV 角點相碰、3D 不相連：兩塊
+        uv_c, t_c = _quad(0.4, 0.4, 0.7, 0.7, base=4)
+        pos_c = [(u, 0.0, -v) for u, v in uv_a] + [(u + 5.0, 0.0, -v) for u, v in uv_c]
+        self.assertEqual(len(uvmap.find_islands(uv_a + uv_c, t_a + t_c, pos_c)), 2)
+        # 接縫：頂點拆開但位置與 UV 都重合，焊回一塊
+        uv_l, t_l = _quad(0.1, 0.1, 0.3, 0.4)
+        uv_r, t_r = _quad(0.3, 0.1, 0.5, 0.4, base=4)
+        pos_s = [(u, 0.0, -v) for u, v in uv_l + uv_r]
+        self.assertEqual(len(uvmap.find_islands(uv_l + uv_r, t_l + t_r, pos_s)), 1)
+        # 經 NIF 走 unpack：layout 有 2 個 island，且同 shape 重疊列出來
+        nif = self.tmp / "in" / "bracers.nif"
+        nif.write_bytes(synth.make_nif([{"name": "Bracers", "uvs": uv_a + uv_b, "tris": t_a + t_b,
+                                         "verts": pos, "textures": [synth.DRESS_D] + [""] * 8}]))
+        L = unpack([nif], [self.dds_d], self.tmp / "br")
+        sh = L["shapes"][0]
+        self.assertEqual(len(sh["islands"]), 2)
+        ov = [o for o in L["overlaps"] if o["a"] == "bracers.Bracers#i0" and o["b"] == "bracers.Bracers#i1"]
+        self.assertEqual(len(ov), 1)
+        self.assertGreater(ov[0]["pixels"], 100)
+
+    # 不擋 4：遮罩只涵蓋中心落在三角形內的 texel；對接的兩塊不重疊；細三角形至少一像素
+    def test_mask_exact_texels_and_thin_triangles(self):
+        uv, t = _quad(0.25, 0.25, 0.5, 0.5)
+        m = uvmap.rasterize(_shape(uv, t), range(2), (8, 8))
+        self.assertEqual(m.histogram()[255], 4)
+        self.assertEqual(m.getbbox(), (2, 2, 4, 4))
+        uv_l, t_l = _quad(0.0, 0.0, 0.5, 1.0)
+        uv_r, t_r = _quad(0.5, 0.0, 1.0, 1.0)
+        a = uvmap.rasterize(_shape(uv_l, t_l), range(2), (64, 64))
+        b = uvmap.rasterize(_shape(uv_r, t_r), range(2), (64, 64))
+        self.assertEqual(uvmap.overlap_pixels(a, b), 0)
+        self.assertEqual(a.histogram()[255] + b.histogram()[255], 64 * 64)
+        thin = _shape([(0.1, 0.5), (0.9, 0.5), (0.5, 0.501)], [(0, 1, 2)])
+        self.assertGreater(uvmap.rasterize(thin, [0], (64, 64)).histogram()[255], 0)
+        dot = _shape([(0.5, 0.5), (0.5001, 0.5), (0.5, 0.5001)], [(0, 1, 2)])
+        self.assertGreater(uvmap.rasterize(dot, [0], (64, 64)).histogram()[255], 0)
+
+    # 不擋 5：法線圖預設拒絕，清單寫明 allow_normal 才准
+    def test_normal_map_refused_unless_allowed(self):
+        p = self.ops_file([{"op": "fill", "target": {"shape": "Top"}, "color": "red"}], name="n", texture="dress_n")
+        rc, _o, err = run_cli(["edit", str(p), "--out", str(self.tmp / "ed" / "nm.png")])
+        self.assertEqual(rc, 2, err)
+        self.assertIn("allow_normal", err)
+        p = self.ops_file([{"op": "fill", "target": {"shape": "Top"}, "color": "red"}], name="n2", texture="dress_n",
+                          allow_normal=True)
+        rc, _o, err = run_cli(["edit", str(p), "--out", str(self.tmp / "ed" / "nm2.png")])
+        self.assertEqual(rc, 0, err)
+
+    # 不擋 6：先 grow／feather 再扣 exclude，被扣掉的區域不會長回去
+    def test_exclude_applied_after_grow_and_feather(self):
+        ctx = self.ctx()
+        rib = edit.target_mask(ctx, {"shape": "Ribbon"})
+        for extra in ({"grow": 2}, {"feather": 2}, {"grow": 1, "feather": 1}):
+            m = edit.target_mask(ctx, {"shape": "Top", "island": 0, "exclude": {"shape": "Ribbon"}, **extra})
+            hit = [p for p in range(S * S) if rib.getdata()[p] == 255 and m.getdata()[p] > 0]
+            self.assertEqual(hit, [], extra)
+        g = edit.target_mask(ctx, {"shape": "Top", "island": 0, "grow": 2, "exclude": {"shape": "Ribbon"}})
+        self.assertGreater(g.histogram()[255], edit.target_mask(ctx, {"shape": "Top", "island": 0,
+                                                                         "exclude": {"shape": "Ribbon"}}).histogram()[255])
+
+    # 不擋 7：硬連結與 _layer-apply 根要擋；pack 的 mip 內容要對
+    def test_writeguard_hardlink_and_layer_apply(self):
+        with self.assertRaises(WriteGuardError):
+            self.do_unpack(out="_layer-apply/x")
+        (self.tmp / "h").mkdir()
+        src = self.tmp / "keep.json"
+        src.write_text("{}", "utf-8")
+        os.link(src, self.tmp / "h" / "layout.json")
+        with self.assertRaises(WriteGuardError):
+            self.do_unpack(out="h")
+        self.assertEqual(src.read_text("utf-8"), "{}")
+        self.assertFalse((self.tmp / "h" / "textures").exists())        # 先檢查再寫：沒留下一半產物
+
+    def test_pack_mip1_content(self):
+        p = self.tmp / "e.png"
+        self.d_im.save(p)
+        pack(p, self.dds_d, self.tmp / "m.dds")
+        data = (self.tmp / "m.dds").read_bytes()
+        off = 128 + S * S * 4
+        mip1 = data[off:off + (S // 2) * (S // 2) * 4]
+        r, g, b, a = self.d_im.resize((S // 2, S // 2), Image.BOX).split()
+        self.assertEqual(mip1, Image.merge("RGBA", (b, g, r, a)).tobytes())     # BGRA
+
+    # 不擋 8：record 存清單檔絕對路徑（換 cwd 也能 replay）與 Pillow 版本
+    def test_record_abs_ops_path_and_pillow_version(self):
+        import PIL
+        self.ops_file([{"op": "fill", "target": {"shape": "Top"}, "color": "red"}], name="rel")
+        old = os.getcwd()
+        try:
+            os.chdir(self.ops_dir)
+            rec = edit.edit("rel.ops.json", self.tmp / "ed" / "rel.png")
+            os.chdir(self.tmp)
+            self.assertTrue(Path(rec["ops_file"]).is_absolute())
+            self.assertEqual(rec["pillow"], PIL.__version__)
+            r = edit.replay(self.tmp / "ed" / "rel.png.record.json")
+        finally:
+            os.chdir(old)
+        self.assertTrue(r["same_output"])
+        self.assertEqual(r["warnings"], [])
+        recp = self.tmp / "ed" / "rel.png.record.json"
+        d = json.loads(recp.read_text("utf-8"))
+        d["pillow"] = "0.0.0"
+        recp.write_text(json.dumps(d), "utf-8")
+        self.assertTrue(any("Pillow" in w for w in edit.replay(recp)["warnings"]))
+
+    # 不擋 9：--out 是別的非空夾就拒；重跑同夾時舊的、這次沒產出的檔列在 stale_files
+    def test_unpack_out_dir_rules_and_stale_files(self):
+        (self.tmp / "busy").mkdir()
+        (self.tmp / "busy" / "notes.txt").write_text("x", "utf-8")
+        with self.assertRaises(UnpackError):
+            self.do_unpack(out="busy")
+        lp = self.tmp / "out" / "layout.json"
+        L = json.loads(lp.read_text("utf-8"))
+        self.assertEqual(L["stale_files"], [])
+        top = next(s for s in L["shapes"] if s["name"] == "Top")["maps"]["dress_d"]
+        top["islands"].append({"index": 9, "mask": "masks/128x128/dress.Top.i9.png"})
+        lp.write_text(json.dumps(L), "utf-8")
+        (self.tmp / "out" / "masks" / "128x128" / "dress.Top.i9.png").write_bytes(b"old")
+        rc, out, err = run_cli(["unpack", "--nif", str(self.nif), "--tex", str(self.dds_d), "--tex", str(self.dds_n),
+                                "--out", str(self.tmp / "out")])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["stale_files"], ["masks/128x128/dress.Top.i9.png"])
+
+
 if __name__ == "__main__":
     unittest.main()

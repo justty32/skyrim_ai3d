@@ -1,6 +1,6 @@
 """texedit CLI：unpack／pack／edit／replay／diff／demo。全部離線；只寫白名單內的輸出（見 paths.py）。
 
-rc：0 完成、1 檢查沒過（pack 尺寸不符、`--fail-on-alpha` 時 alpha 被改、replay 對不上）、2 拒絕（輸入錯、寫入白名單擋下）。
+rc：0 完成、1 檢查沒過（pack 尺寸不符、`--fail-on-alpha` 時 alpha 被改、replay 對不上、edit `--strict` 時有 warnings）、2 拒絕（輸入錯、寫入白名單擋下）。
 """
 from __future__ import annotations
 
@@ -38,7 +38,8 @@ def cmd_unpack(a) -> int:
                              "overlay_all": v["overlay_all"]} for k, v in layout["textures"].items()},
             "shapes": {s["key"]: {"islands": len(s["islands"]), "textures": sorted(s["maps"])}
                        for s in layout["shapes"]},
-            "overlaps": len(layout["overlaps"]), "missing_textures": layout["missing_textures"]})
+            "overlaps": len(layout["overlaps"]), "missing_textures": layout["missing_textures"],
+            "stale_files": layout["stale_files"]})
     return 0
 
 
@@ -52,9 +53,9 @@ def cmd_pack(a) -> int:
 
 def cmd_edit(a) -> int:
     rec = editmod.edit(a.ops, a.out)
-    _print({k: rec[k] for k in ("output", "changed_pixels", "steps", "by_shape", "output_pixels_sha256")}
+    _print({k: rec[k] for k in ("output", "changed_pixels", "steps", "by_shape", "output_pixels_sha256", "warnings")}
            | {"record": a.out + ".record.json"})
-    return 0
+    return 1 if a.strict and rec["warnings"] else 0
 
 
 def cmd_replay(a) -> int:
@@ -97,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("edit", help="照操作清單（texedit-ops/1）改貼圖 PNG，寫 OUT 與 OUT.record.json")
     e.add_argument("ops", help="操作清單 JSON")
     e.add_argument("--out", required=True, help="輸出 PNG（白名單內）")
+    e.add_argument("--strict", action="store_true", help="有 warnings（某步一個像素都沒改）就 rc 1（輸出照寫）")
     e.set_defaults(fn=cmd_edit)
     r = sub.add_parser("replay", help="照 record 重跑，比輸出像素 sha256（rc 1＝對不上）")
     r.add_argument("record")
