@@ -8,10 +8,12 @@
 
 | 部分 | 內容 | 狀態 |
 |---|---|---|
-| `texedit/` | 貼圖編輯：DDS 拆成 PNG、各 shape 的 UV 疊圖與選區遮罩、照操作清單改圖、裝回 DDS | 2026-11-26 起做（階段 0） |
+| [`texedit/`](texedit/README.md) | 貼圖編輯：DDS 拆成 PNG、各 shape 的 UV 疊圖與選區遮罩、照操作清單改圖、裝回 DDS。用法：repo 根 `python3 -m texedit demo --out DIR`，其餘見 [texedit/README](texedit/README.md) | 階段 0 靜態通過，待回家驗 |
 | 預覽 | 把衣服連貼圖畫成圖，改完不進遊戲先看 | 下一步 |
 | 網格編輯 | Blender 無頭腳本（`blender -b --python`）＋ PyNifly、Outfit Studio 6.2 的 MCP：無袖、貼身、修穿模、加配件 | 規劃中，工具只裝在家裡那台 |
 | AI 生成 | 在我們自己的 UV 上畫紋理（StableGen 一類）、配件草模（TripoSG 一類） | 規劃中，模型權重要使用者同意才下載 |
+
+共用的小函式庫在 `ai3dlib/`（NIF 讀寫與幾何、DDS、寫入白名單、拒寫的根、`--data` 資產查找）；`nif`、`dds`、`writeguard`、`geom` 複製自私有工作區，各檔檔頭記來源 commit，手動同步。
 
 不在這裡做的：
 - NIF 與 glTF／OBJ 互轉用同層的 [model-converter](../model-converter/README.md)，不另寫。

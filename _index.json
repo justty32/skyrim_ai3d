@@ -8,7 +8,13 @@
   "README.md": {
     "description": "總覽：使用者許願、AI 改貼圖與模型；範圍與各部分狀態"
   },
+  "ai3dlib": {
+    "description": "共用函式庫：nif／dds／writeguard／geom（複製自私有工作區，檔頭記來源 commit）、paths（拒寫的根）、assets（--data 查找）"
+  },
   "tests": {
-    "description": "合成樣本測試"
+    "description": "合成樣本測試（texedit 23 條）；`python3 -m unittest discover -s tests -v`"
+  },
+  "texedit": {
+    "description": "貼圖編輯（階段 0）：unpack／edit／replay／diff／pack／demo；`python3 -m texedit`，用法見 texedit/README.md"
   }
 }
